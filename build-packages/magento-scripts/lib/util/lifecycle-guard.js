@@ -52,8 +52,13 @@ const readGuard = ({ env = process.env, configFile } = {}) => {
  * process when the guard refuses or cannot run (fail closed), and registers
  * the matching `end` call on exit when it admits.
  *
+ * An interrupted command (SIGINT, SIGTERM, SIGHUP) does not call `end`: the
+ * Docker work it already started can still be running or finishing in the
+ * engine. It calls `interrupt` instead, which keeps the guard closed until
+ * someone reconciles, and then dies of the same signal as it would have.
+ *
  * @param {string} command
- * @param {{ cwd?: string, env?: NodeJS.ProcessEnv, configFile?: string, exit?: (code: number) => void, onExit?: (fn: () => void) => void }} [options]
+ * @param {{ cwd?: string, env?: NodeJS.ProcessEnv, configFile?: string, exit?: (code: number) => void, onExit?: (fn: () => void) => void, onSignal?: (signal: string, fn: () => void) => void }} [options]
  * @returns {{ status: 'not-gated' | 'no-guard' | 'admitted', file?: string }}
  */
 const enterLifecycleGuard = (
@@ -63,7 +68,8 @@ const enterLifecycleGuard = (
         env = process.env,
         configFile,
         exit = (code) => process.exit(code),
-        onExit = (fn) => process.once('exit', fn)
+        onExit = (fn) => process.once('exit', fn),
+        onSignal = defaultOnSignal
     } = {}
 ) => {
     if (!GATED_COMMANDS.includes(command)) {
@@ -110,14 +116,53 @@ const enterLifecycleGuard = (
         exit(result.status || 1)
         return { status: 'refused', file: guard.file }
     }
+    let interrupted = false
     onExit(() => {
+        if (interrupted) {
+            return
+        }
         spawnSync(bin, args('end'), {
             cwd,
             env,
             stdio: ['ignore', 'ignore', 'inherit']
         })
     })
+    INTERRUPT_SIGNALS.forEach((signal) =>
+        onSignal(signal, () => {
+            if (interrupted) {
+                return
+            }
+            interrupted = true
+            spawnSync(bin, [...args('interrupt'), '--signal', signal], {
+                cwd,
+                env,
+                stdio: ['ignore', 'ignore', 'inherit']
+            })
+        })
+    )
     return { status: 'admitted', file: guard.file }
 }
 
-module.exports = { GATED_COMMANDS, readGuard, enterLifecycleGuard }
+const INTERRUPT_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP']
+
+/**
+ * Runs `fn`, then lets the signal do what it would have done without us:
+ * terminate the process, unless something else in CMA also listens for it.
+ */
+const defaultOnSignal = (signal, fn) => {
+    const handler = () => {
+        fn()
+        process.removeListener(signal, handler)
+        if (process.listenerCount(signal) === 0) {
+            process.kill(process.pid, signal)
+        }
+    }
+    process.on(signal, handler)
+}
+
+module.exports = {
+    GATED_COMMANDS,
+    INTERRUPT_SIGNALS,
+    readGuard,
+    enterLifecycleGuard
+}

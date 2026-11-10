@@ -21,14 +21,18 @@ const calls = () =>
 const run = (command, env = {}) => {
     const exits = []
     const hooks = []
+    const signals = {}
     const r = enterLifecycleGuard(command, {
         cwd: dir,
         env: { ...process.env, ...env },
         configFile,
         exit: (code) => exits.push(code),
-        onExit: (fn) => hooks.push(fn)
+        onExit: (fn) => hooks.push(fn),
+        onSignal: (signal, fn) => {
+            signals[signal] = fn
+        }
     })
-    return { r, exits, hooks }
+    return { r, exits, hooks, signals }
 }
 
 try {
@@ -54,6 +58,22 @@ try {
     assert.deepStrictEqual(calls(), [
         `begin --root ${dir} --command stop --pid ${process.pid}`,
         `end --root ${dir} --command stop --pid ${process.pid}`
+    ])
+
+    // Interrupted: calls interrupt, never end, even when exit fires later.
+    fs.rmSync(log)
+    const killed = run('start')
+    assert.deepStrictEqual(Object.keys(killed.signals).sort(), [
+        'SIGHUP',
+        'SIGINT',
+        'SIGTERM'
+    ])
+    killed.signals.SIGTERM()
+    killed.signals.SIGINT()
+    killed.hooks.forEach((fn) => fn())
+    assert.deepStrictEqual(calls(), [
+        `begin --root ${dir} --command start --pid ${process.pid}`,
+        `interrupt --root ${dir} --command start --pid ${process.pid} --signal SIGTERM`
     ])
 
     // Refused: exits with the guard's status, never registers end.
