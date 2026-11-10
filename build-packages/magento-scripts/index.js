@@ -6,6 +6,7 @@ const logger = require('@scandipwa/scandipwa-dev-utils/logger')
 const semver = require('semver')
 const isInstalledGlobally = require('is-installed-globally')
 const isRunningRoot = require('./lib/util/is-running-root')
+const { enterLifecycleGuard } = require('./lib/util/lifecycle-guard')
 
 if (isRunningRoot()) {
     logger.error('Root privileges detected!')
@@ -129,6 +130,11 @@ const newVersionIsAPatch = (latestVersion, currentVersion) => {
             'Suppress all task progress output (Listr silent renderer). Enabled automatically when stdout is not a TTY.',
         type: 'boolean',
         default: false
+    })
+
+    // Let an external lifecycle guard refuse commands that change the stack
+    yargs.middleware((argv) => {
+        enterLifecycleGuard(String(argv._[0]))
     })
 
     // Initialize program commands
